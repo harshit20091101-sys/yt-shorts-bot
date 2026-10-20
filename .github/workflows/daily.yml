@@ -1,0 +1,61 @@
+name: Daily Short
+
+on:
+  schedule:
+    - cron: "30 11 * * *"   # roz 5:00 PM IST
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "1 = sirf video banao (upload nahi), 0 = upload bhi karo"
+        default: "1"
+
+permissions:
+  contents: write
+
+jobs:
+  make:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install ffmpeg and Hindi font
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg libraqm0 libfribidi0 fonts-noto-core
+          mkdir -p fonts
+          curl -fL -o fonts/Mukta-Bold.ttf "https://github.com/google/fonts/raw/main/ofl/mukta/Mukta-Bold.ttf" || true
+
+      - name: Install python packages
+        run: pip install -U -r requirements.txt
+
+      - name: Make and upload Short
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          YT_CLIENT_ID: ${{ secrets.YT_CLIENT_ID }}
+          YT_CLIENT_SECRET: ${{ secrets.YT_CLIENT_SECRET }}
+          YT_REFRESH_TOKEN: ${{ secrets.YT_REFRESH_TOKEN }}
+          POLLINATIONS_TOKEN: ${{ secrets.POLLINATIONS_TOKEN }}
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
+        run: python main.py
+
+      - name: Save video for checking
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: short
+          path: out/short.mp4
+          retention-days: 3
+          if-no-files-found: ignore
+
+      - name: Save history
+        if: success()
+        run: |
+          git config user.name "bot"
+          git config user.email "bot@users.noreply.github.com"
+          git add history.json
+          git diff --cached --quiet || (git commit -m "update history" && git push)
