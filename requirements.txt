@@ -1,0 +1,7 @@
+requests
+Pillow
+edge-tts
+gTTS
+google-api-python-client
+google-auth
+google-auth-httplib2
