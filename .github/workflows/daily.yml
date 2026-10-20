@@ -47,9 +47,9 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: short
-          path: out/short.mp4
-          retention-days: 3
+          name: short-${{ github.run_number }}
+          path: out/
+          retention-days: 14
           if-no-files-found: ignore
 
       - name: Save history
