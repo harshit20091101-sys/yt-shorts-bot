@@ -320,6 +320,18 @@ def upload(path, story):
             raise
 
 
+def write_info(story):
+    tags = ", ".join(str(t) for t in story.get("tags", []))
+    txt = (
+        "TITLE:\n" + story["title"].strip()[:88] + " #Shorts\n\n"
+        "DESCRIPTION:\n" + story.get("description", "") + "\n\n#Shorts #HindiStory #Kahani\n\n"
+        "TAGS:\n" + tags + "\n\n"
+        "STUDIO SETTINGS:\n- Made for kids: No\n- Altered content (AI-generated): Yes\n"
+    )
+    with open(f"{OUT}/info.txt", "w", encoding="utf-8") as f:
+        f.write(txt)
+
+
 # ---------------------------------------------------------------- main
 def main():
     global FONT
@@ -353,10 +365,14 @@ def main():
         raise RuntimeError("Video bahut chhoti hai, upload skip")
     if ok_images < n * 0.5:
         raise RuntimeError("Aadhi se zyada images nahi aayi, upload skip (video artifact me dekh sakte ho)")
+    write_info(story)
     if DRY_RUN:
         print("DRY RUN: upload skip kiya")
         return
-    upload(final, story)
+    if os.environ.get("YT_REFRESH_TOKEN"):
+        upload(final, story)
+    else:
+        print("MANUAL MODE: video ready. Artifact download karke YouTube Studio se upload karo.")
     history.append(story["title"])
     save_history(history)
 
