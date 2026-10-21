@@ -1,18 +1,18 @@
-import os, json, re, time, random, asyncio, subprocess, datetime, math
+import os, sys, json, re, time, random, asyncio, subprocess, datetime, math, shutil
 from urllib.parse import quote
 import requests
 from PIL import Image, ImageDraw, ImageFont, features
 
 W, H, FPS = 1080, 1920, 30
 WORK, OUT = "work", "out"
-os.makedirs(WORK, exist_ok=True)
-os.makedirs(OUT, exist_ok=True)
+for d in (WORK, OUT):
+    os.makedirs(d, exist_ok=True)
 
 DRY_RUN = os.environ.get("DRY_RUN", "") == "1"
 VOICE = os.environ.get("VOICE", "hi-IN-MadhurNeural")  # female: hi-IN-SwaraNeural
+SPEED = float(os.environ.get("SPEED", "1.2"))           # voice speed 1.2x
 GEMINI_KEY = os.environ.get("GEMINI_API_KEY", "")
 POLL_TOKEN = os.environ.get("POLLINATIONS_TOKEN", "")
-# Pehla model chalega, fail hua to agla. Model naam badle to GEMINI_MODEL secret/env me daalo.
 MODELS = [m for m in [os.environ.get("GEMINI_MODEL"), "gemini-3.8-flash",
                       "gemini-3.6-flash", "gemini-3.1-flash-lite"] if m]
 
@@ -28,7 +28,6 @@ GENRES = [
 ]
 STYLE = ("cinematic, dramatic lighting, highly detailed, vertical 9:16 composition, "
          "no text, no letters, no watermark")
-
 FONT = None
 
 
@@ -56,26 +55,31 @@ def save_history(h):
 # ---------------------------------------------------------------- story
 def ask_gemini(prompt):
     last = None
-    for model in MODELS:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-        body = {"contents": [{"parts": [{"text": prompt}]}],
-                "generationConfig": {"temperature": 1.0, "responseMimeType": "application/json"}}
-        try:
-            r = requests.post(url, headers={"x-goog-api-key": GEMINI_KEY,
-                                            "Content-Type": "application/json"},
-                              json=body, timeout=180)
-            if r.status_code != 200:
-                print(model, "HTTP", r.status_code, r.text[:300])
-                last = f"{model}: {r.status_code}"
-                continue
-            parts = r.json()["candidates"][0]["content"]["parts"]
-            text = "".join(p.get("text", "") for p in parts if not p.get("thought"))
-            text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip())
-            print("story model:", model)
-            return json.loads(text)
-        except Exception as e:
-            print(model, "error:", e)
-            last = f"{model}: {e}"
+    for rnd in range(4):  # server busy (503/429) ho to wait karke dobara
+        if rnd:
+            wait = 30 * rnd
+            print(f"Gemini busy/fail, {wait}s wait, round {rnd + 1}...")
+            time.sleep(wait)
+        for model in MODELS:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+            body = {"contents": [{"parts": [{"text": prompt}]}],
+                    "generationConfig": {"temperature": 1.0, "responseMimeType": "application/json"}}
+            try:
+                r = requests.post(url, headers={"x-goog-api-key": GEMINI_KEY,
+                                                "Content-Type": "application/json"},
+                                  json=body, timeout=180)
+                if r.status_code != 200:
+                    print(model, "HTTP", r.status_code, r.text[:200])
+                    last = f"{model}: {r.status_code}"
+                    continue
+                parts = r.json()["candidates"][0]["content"]["parts"]
+                text = "".join(p.get("text", "") for p in parts if not p.get("thought"))
+                text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip())
+                print("story model:", model)
+                return json.loads(text)
+            except Exception as e:
+                print(model, "error:", e)
+                last = f"{model}: {e}"
     raise RuntimeError(f"Gemini fail: {last}")
 
 
@@ -87,7 +91,7 @@ NARRATION RULES
 - Hindi in Devanagari script ONLY (simple, spoken, conversational Hindi). No English letters. Write numbers in words.
 - Structure: (1) a shocking hook in the very first sentence, (2) fast build-up with concrete details like names, places, objects, (3) a twist, (4) a memorable last line.
 - No moral lecture, no "dosto aaj hum..." intro. Start directly inside the story.
-- Total narration: 150 to 180 Hindi words, split into 9 to 11 scenes. Each scene = 1 or 2 short sentences (max 22 words).
+- Total narration: 170 to 200 Hindi words, split into 9 to 11 scenes. Each scene = 1 or 2 short sentences (max 26 words).
 
 IMAGE RULES
 - For every scene give image_prompt in English, 25 to 40 words, one concrete cinematic visual.
@@ -111,7 +115,7 @@ def make_story(history):
         scenes = [s for s in data.get("scenes", []) if s.get("narration") and s.get("image_prompt")]
         words = sum(len(s["narration"].split()) for s in scenes)
         print(f"attempt {attempt + 1}: {len(scenes)} scenes, {words} words")
-        if len(scenes) >= 7 and words >= 110:
+        if len(scenes) >= 7 and words >= 120:
             data["scenes"] = scenes[:14]
             data.setdefault("title", "Ek ajeeb kahani")
             return data
@@ -121,7 +125,13 @@ def make_story(history):
 # ---------------------------------------------------------------- voice
 async def _edge(text, out):
     import edge_tts
-    await edge_tts.Communicate(text, VOICE, rate="-5%").save(out)
+    pct = int(round((SPEED - 1) * 100))
+    await edge_tts.Communicate(text, VOICE, rate=f"{pct:+d}%").save(out)
+
+
+def speed_up(src, dst):
+    run(["ffmpeg", "-y", "-loglevel", "error", "-i", src,
+         "-filter:a", f"atempo={SPEED}", dst])
 
 
 def tts(text, out):
@@ -132,7 +142,9 @@ def tts(text, out):
     except Exception as e:
         print("edge-tts failed, gTTS fallback:", e)
     from gtts import gTTS
-    gTTS(text=text, lang="hi").save(out)
+    tmp = out + ".slow.mp3"
+    gTTS(text=text, lang="hi").save(tmp)
+    speed_up(tmp, out)
 
 
 def duration(path):
@@ -159,11 +171,25 @@ def fetch_image(prompt, seed, out, first):
                 with open(out, "wb") as f:
                     f.write(r.content)
                 return True
-            print(f"image try {attempt + 1}: HTTP {r.status_code} {ctype} {r.text[:120] if 'text' in ctype else ''}")
+            print(f"image try {attempt + 1}: HTTP {r.status_code} {ctype}")
         except Exception as e:
             print(f"image try {attempt + 1} error:", e)
         time.sleep(20 + attempt * 10)
     return False
+
+
+def fill_image_gaps(paths, ok_flags):
+    """Jis scene ki image nahi aayi, usme sabse paas wali kaam-wali image copy karo."""
+    good = [i for i, ok in enumerate(ok_flags) if ok]
+    if not good:
+        return False
+    for i, ok in enumerate(ok_flags):
+        if not ok:
+            j = min(good, key=lambda g: abs(g - i))
+            shutil.copyfile(paths[j], paths[i])
+            ok_flags[i] = True
+            print(f"scene {i + 1}: image missing, scene {j + 1} ki image reuse ki")
+    return True
 
 
 def make_bg(src, out):
@@ -272,7 +298,43 @@ def concat(clips, out):
          "-c", "copy", "-movflags", "+faststart", out])
 
 
-# ---------------------------------------------------------------- upload
+def write_info(story):
+    tags = ", ".join(str(t) for t in story.get("tags", []))
+    txt = (
+        "TITLE:\n" + story["title"].strip()[:88] + " #Shorts\n\n"
+        "DESCRIPTION:\n" + story.get("description", "") + "\n\n#Shorts #HindiStory #Kahani\n\n"
+        "TAGS:\n" + tags + "\n\n"
+        "STUDIO SETTINGS:\n- Made for kids: No\n- Altered content (AI-generated): Yes\n"
+    )
+    with open(f"{OUT}/info.txt", "w", encoding="utf-8") as f:
+        f.write(txt)
+    meta = {"title": story["title"].strip()[:88] + " #Shorts",
+            "description": story.get("description", "") + "\n\n#Shorts #HindiStory #Kahani",
+            "tags": tags}
+    with open(f"{OUT}/meta.json", "w", encoding="utf-8") as f:
+        json.dump(meta, f, ensure_ascii=False)
+
+
+def make_small_video(src, dst, target_bytes=4_200_000, limit_bytes=4_600_000):
+    """Make.com free plan ki 5 MB file limit ke liye chhoti 720p copy."""
+    dur = duration(src)
+    audio_k = 64
+    vid_k = max(int(target_bytes * 8 / dur / 1000) - audio_k, 250)
+    for _ in range(3):
+        run(["ffmpeg", "-y", "-loglevel", "error", "-i", src, "-vf", "scale=720:1280",
+             "-c:v", "libx264", "-preset", "medium", "-b:v", f"{vid_k}k",
+             "-maxrate", f"{int(vid_k * 1.3)}k", "-bufsize", f"{vid_k * 2}k",
+             "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", f"{audio_k}k", "-ac", "1",
+             "-movflags", "+faststart", dst])
+        size = os.path.getsize(dst)
+        print(f"small video: {size / 1e6:.2f} MB at {vid_k}k")
+        if size <= limit_bytes:
+            return
+        vid_k = int(vid_k * 0.8)
+    raise RuntimeError("small video 5 MB se bada reh gaya")
+
+
+# ---------------------------------------------------------------- upload (optional)
 def upload(path, story):
     from google.oauth2.credentials import Credentials
     from google.auth.transport.requests import Request
@@ -295,7 +357,7 @@ def upload(path, story):
     def body(synthetic):
         st = {"privacyStatus": "public", "selfDeclaredMadeForKids": False}
         if synthetic:
-            st["containsSyntheticMedia"] = True  # AI-generated content disclosure
+            st["containsSyntheticMedia"] = True
         return {"snippet": {"title": title, "description": desc, "tags": tags,
                             "categoryId": "24", "defaultLanguage": "hi",
                             "defaultAudioLanguage": "hi"},
@@ -311,25 +373,13 @@ def upload(path, story):
                 _, resp = req.next_chunk()
             print("UPLOADED: https://youtube.com/shorts/" + resp["id"])
             if resp.get("status", {}).get("privacyStatus") != "public":
-                print("WARNING: video public nahi hai (private lock). YouTube API audit pending hoga.")
+                print("::warning title=Video private lock::YouTube API audit pending hai, video private rahegi.")
             return
         except HttpError as e:
             print("upload error:", e)
             if synthetic and e.resp.status == 400:
                 continue
             raise
-
-
-def write_info(story):
-    tags = ", ".join(str(t) for t in story.get("tags", []))
-    txt = (
-        "TITLE:\n" + story["title"].strip()[:88] + " #Shorts\n\n"
-        "DESCRIPTION:\n" + story.get("description", "") + "\n\n#Shorts #HindiStory #Kahani\n\n"
-        "TAGS:\n" + tags + "\n\n"
-        "STUDIO SETTINGS:\n- Made for kids: No\n- Altered content (AI-generated): Yes\n"
-    )
-    with open(f"{OUT}/info.txt", "w", encoding="utf-8") as f:
-        f.write(txt)
 
 
 # ---------------------------------------------------------------- main
@@ -340,42 +390,71 @@ def main():
     history = load_history()
     story = make_story(history)
     print("TITLE:", story["title"])
+    scenes = story["scenes"]
+    n = len(scenes)
 
-    clips, ok_images = [], 0
-    n = len(story["scenes"])
-    for i, sc in enumerate(story["scenes"]):
+    audios, imgs, ok_flags, durs = [], [], [], []
+    for i, sc in enumerate(scenes):
         print(f"--- scene {i + 1}/{n}")
-        audio = f"{WORK}/a{i}.mp3"
-        tts(sc["narration"].strip(), audio)
-        dur = duration(audio) + 0.35
-        img = f"{WORK}/i{i}.jpg"
-        ok = fetch_image(sc["image_prompt"].strip() + ", " + STYLE, random.randint(1, 999999), img, i == 0)
-        ok_images += 1 if ok else 0
+        a = f"{WORK}/a{i}.mp3"
+        tts(sc["narration"].strip(), a)
+        audios.append(a)
+        durs.append(duration(a) + 0.25)
+        p = f"{WORK}/i{i}.jpg"
+        ok = fetch_image(sc["image_prompt"].strip() + ", " + STYLE, random.randint(1, 999999), p, i == 0)
+        imgs.append(p)
+        ok_flags.append(ok)
+
+    real_ok = sum(ok_flags)
+    print(f"IMAGES OK: {real_ok}/{n}")
+    have_images = fill_image_gaps(imgs, ok_flags)
+
+    clips = []
+    for i, sc in enumerate(scenes):
         bg, cap, clip = f"{WORK}/bg{i}.jpg", f"{WORK}/c{i}.png", f"{WORK}/clip{i}.mp4"
-        make_bg(img if ok else None, bg)
+        make_bg(imgs[i] if have_images else None, bg)
         caption_png(sc["narration"].strip(), cap)
-        make_clip(i, bg, cap, audio, dur, clip)
+        make_clip(i, bg, cap, audios[i], durs[i], clip)
         clips.append(clip)
 
     final = f"{OUT}/short.mp4"
     concat(clips, final)
-    total = duration(final)
-    print(f"IMAGES OK: {ok_images}/{n} | VIDEO LENGTH: {total:.1f}s")
-    if total < 25:
-        raise RuntimeError("Video bahut chhoti hai, upload skip")
-    if ok_images < n * 0.5:
-        raise RuntimeError("Aadhi se zyada images nahi aayi, upload skip (video artifact me dekh sakte ho)")
     write_info(story)
-    if DRY_RUN:
-        print("DRY RUN: upload skip kiya")
+    try:
+        make_small_video(final, f"{OUT}/short_small.mp4")
+    except Exception as e:
+        print("small video fail:", e)
+    total = duration(final)
+    print(f"VIDEO LENGTH: {total:.1f}s")
+
+    if not have_images:
+        print("::warning title=Images nahi aayi::Aaj koi image nahi bani, upload/history skip. Kal dobara try hoga.")
         return
+    if total < 25:
+        print("::warning title=Video chhoti::Video 25 sec se chhoti hai, upload skip.")
+        return
+    if DRY_RUN:
+        print("DRY RUN: upload aur history skip")
+        return
+    with open(f"{OUT}/READY", "w") as f:
+        f.write("1")
+
     if os.environ.get("YT_REFRESH_TOKEN"):
-        upload(final, story)
+        try:
+            upload(final, story)
+        except Exception as e:
+            print(f"::warning title=YouTube upload fail::{e}. Video artifact me hai, manual upload kar sakte ho.")
     else:
-        print("MANUAL MODE: video ready. Artifact download karke YouTube Studio se upload karo.")
+        print("MANUAL MODE: video ready. Artifacts se download karke YouTube Studio me upload karo.")
     history.append(story["title"])
     save_history(history)
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        print(f"::warning title=Aaj ka Short nahi bana::{e}")
+        sys.exit(0)  # workflow red na ho; kal phir chalega
