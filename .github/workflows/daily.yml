@@ -6,11 +6,15 @@ on:
   workflow_dispatch:
     inputs:
       dry_run:
-        description: "1 = sirf video banao (upload nahi), 0 = upload bhi karo"
+        description: "1 = sirf test video banao, 0 = asli run"
         default: "1"
 
 permissions:
   contents: write
+
+concurrency:
+  group: daily-short
+  cancel-in-progress: false
 
 jobs:
   make:
@@ -25,15 +29,21 @@ jobs:
 
       - name: Install ffmpeg and Hindi font
         run: |
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg libraqm0 libfribidi0 fonts-noto-core
+          for i in 1 2 3; do
+            sudo apt-get update && sudo apt-get install -y ffmpeg libraqm0 libfribidi0 fonts-noto-core && break
+            echo "apt retry $i"; sleep 20
+          done
           mkdir -p fonts
-          curl -fL -o fonts/Mukta-Bold.ttf "https://github.com/google/fonts/raw/main/ofl/mukta/Mukta-Bold.ttf" || true
+          curl -fL --retry 3 -o fonts/Mukta-Bold.ttf "https://github.com/google/fonts/raw/main/ofl/mukta/Mukta-Bold.ttf" || true
 
       - name: Install python packages
-        run: pip install -U -r requirements.txt
+        run: |
+          for i in 1 2 3; do
+            pip install -U -r requirements.txt && break
+            echo "pip retry $i"; sleep 20
+          done
 
-      - name: Make and upload Short
+      - name: Make Short
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           YT_CLIENT_ID: ${{ secrets.YT_CLIENT_ID }}
@@ -43,7 +53,12 @@ jobs:
           DRY_RUN: ${{ github.event.inputs.dry_run }}
         run: python main.py
 
-      - name: Save video for checking
+      - name: Send to Make (optional)
+        env:
+          MAKE_WEBHOOK_URL: ${{ secrets.MAKE_WEBHOOK_URL }}
+        run: python notify_make.py
+
+      - name: Save video for download
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -53,9 +68,9 @@ jobs:
           if-no-files-found: ignore
 
       - name: Save history
-        if: success()
+        if: always()
         run: |
           git config user.name "bot"
           git config user.email "bot@users.noreply.github.com"
           git add history.json
-          git diff --cached --quiet || (git commit -m "update history" && git push)
+          git diff --cached --quiet || (git commit -m "update history" && (git push || (git pull --rebase && git push)))
